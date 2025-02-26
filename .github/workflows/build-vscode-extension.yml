@@ -76,11 +76,8 @@ jobs:
 
           cd ../microsoft-kiota
 
-          npm uninstall @microsoft/kiota --save
-          rm -rf node_modules package-lock.json
-          npm cache clean --force
-
-          npm install --no-save ../npm-package/microsoft-kiota-1.0.0.tgz
+          npm ci
+          npm install ../npm-package/microsoft-kiota-1.0.0.tgz
 
           npm ls @microsoft/kiota
 
