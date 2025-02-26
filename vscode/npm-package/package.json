@@ -13,10 +13,16 @@
   "main": "dist/cjs/index.js",
   "module": "dist/esm/index.js",
   "exports": {
-    "import": "./dist/esm/index.js",
-    "require": "./dist/cjs/index.js"
+    "import": {
+      "types": "./dist/esm/types/index.d.ts",
+      "default": "./dist/esm/index.js"
+    },
+    "require": {
+      "types": "./dist/cjs/types/index.d.ts",
+      "default": "./dist/cjs/index.js"
+    }
   },
-  "types": "dist/types/index.d.ts",
+  "types": "dist/esm/types/index.d.ts",
   "typesVersions": {
     "*": {
       "import": [
@@ -27,6 +33,10 @@
       ]
     }
   },
+  "files": [
+    "dist",
+    "runtime.json"
+  ],
   "type": "module",
   "scripts": {
     "lint": "eslint",
@@ -71,9 +81,5 @@
     "ts-loader": "^9.5.2",
     "typemoq": "^2.1.0",
     "typescript": "^5.7.3"
-  },
-  "files": [
-    "dist",
-    "runtime.json"
-  ]
+  }
 }
