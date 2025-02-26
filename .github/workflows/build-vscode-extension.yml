@@ -59,30 +59,18 @@ jobs:
         
         # applies specifically to vscode 
       - run: |
-          set -e  # Fail on errors
-          
           npm i -g @vscode/vsce
 
           cd ../npm-package
           npm install
           npm run package
 
-          if [ ! -f "microsoft-kiota-1.0.0.tgz" ]; then
-            echo "Error: microsoft-kiota-1.0.0.tgz not found!" >&2
-            exit 1
-          fi
-
-          ls -l microsoft-kiota-1.0.0.tgz
-
           cd ../microsoft-kiota
 
           npm ci
           npm install ../npm-package/microsoft-kiota-1.0.0.tgz
 
-          npm ls @microsoft/kiota
-
           vsce package
-          vsce ls
         working-directory: vscode/${{ matrix.builds.path }}
         name: 'Package VSCode extension'
         if: matrix.builds.id == 'vscode'
