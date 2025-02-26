@@ -69,7 +69,7 @@ jobs:
           vsce ls
         working-directory: vscode/${{ matrix.builds.path }}
         name: 'Package VSCode extension'
-        if: matrix.builds.id == 'package'
+        if: matrix.builds.id == 'vscode'
 
         # back to common operations
 
