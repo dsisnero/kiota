@@ -17,6 +17,7 @@
     "require": "./dist/cjs/index.js"
   },
   "types": "dist/esm/types/index.d.ts",
+  "type": "module",
   "scripts": {
     "lint": "eslint",
     "test": "jest",
