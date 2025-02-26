@@ -66,19 +66,24 @@ jobs:
           cd ../npm-package
           npm install
           npm run package
-          
+
           if [ ! -f "microsoft-kiota-1.0.0.tgz" ]; then
             echo "Error: microsoft-kiota-1.0.0.tgz not found!" >&2
             exit 1
           fi
-          
+
           ls -l microsoft-kiota-1.0.0.tgz
-          
+
           cd ../microsoft-kiota
-          npm install $(realpath ../npm-package/microsoft-kiota-1.0.0.tgz)
-          
-          npm ls @microsoft/kiota 
-          
+
+          npm uninstall @microsoft/kiota --save
+          rm -rf node_modules package-lock.json
+          npm cache clean --force
+
+          npm install --no-save ../npm-package/microsoft-kiota-1.0.0.tgz
+
+          npm ls @microsoft/kiota
+
           vsce package
           vsce ls
         working-directory: vscode/${{ matrix.builds.path }}
