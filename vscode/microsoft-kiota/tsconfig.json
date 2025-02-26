@@ -9,7 +9,10 @@
     "paths": {
       "glob": [
         "./node_modules/glob/dist/commonjs"
-      ] // https://github.com/isaacs/node-glob/issues/557
+      ], // https://github.com/isaacs/node-glob/issues/557
+      "@microsoft/kiota": [
+        "./node_modules/@microsoft/kiota/dist/cjs/"
+      ]
     },
     "sourceMap": true,
     "rootDir": "src",
