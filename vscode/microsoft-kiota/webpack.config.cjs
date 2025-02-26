@@ -31,7 +31,10 @@ const extensionConfig = {
   },
   resolve: {
     // support reading TypeScript and JavaScript files, 📖 -> https://github.com/TypeStrong/ts-loader
-    extensions: ['.ts', '.js']
+    extensions: ['.ts', '.js'],
+    alias: {
+      "@microsoft/kiota": path.resolve(__dirname, "node_modules/@microsoft/kiota/dist")
+    }
   },
   module: {
     rules: [
