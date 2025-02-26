@@ -56,18 +56,21 @@ jobs:
       - run: npm run package
         if: matrix.builds.id == 'package'
         working-directory: vscode/${{ matrix.builds.path }}
-
-        # applies specifically to vscode now
-      - run: npm i -g @vscode/vsce
+        
+        # applies specifically to vscode 
       - run: |
+          npm i -g @vscode/vsce
           cd ../npm-package
           npm install
           npm run package
           cd ../microsoft-kiota
           npm install ../npm-package/microsoft-kiota-1.0.0.tgz
-          vsce package
+          vsce package --no-dependencies
           vsce ls
         working-directory: vscode/${{ matrix.builds.path }}
+        name: 'Package VSCode extension'
+        if: matrix.builds.id == 'package'
+
         # back to common operations
 
       - name: Upload artifact
