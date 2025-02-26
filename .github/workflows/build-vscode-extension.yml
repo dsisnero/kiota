@@ -63,9 +63,11 @@ jobs:
           cd ../npm-package
           npm install
           npm run package
+          ls -l microsoft-kiota-1.0.0.tgz
           cd ../microsoft-kiota
           npm install ../npm-package/microsoft-kiota-1.0.0.tgz
-          vsce package --no-dependencies
+          npm ls @microsoft/kiota 
+          vsce package
           vsce ls
         working-directory: vscode/${{ matrix.builds.path }}
         name: 'Package VSCode extension'
