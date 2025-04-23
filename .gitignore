@@ -451,3 +451,6 @@ it/openapi.yaml
 
 idempotency-results/
 .aider*
+vscode/npm-package/dist/*
+vscode/npm-package/coverage/*
+vscode/npm-package/.kiotabin/*

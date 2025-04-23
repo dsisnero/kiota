@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -66,16 +67,18 @@ public partial class PluginsGenerationService
         PrepareDescriptionForCopilot(trimmedPluginDocument);
         // trimming a second time to remove any components that are no longer used after the inlining
         trimmedPluginDocument = GetDocumentWithTrimmedComponentsAndResponses(trimmedPluginDocument);
-        trimmedPluginDocument.Info.Title = trimmedPluginDocument.Info.Title[..^9]; // removing the second ` - Subset` suffix from the title
+        trimmedPluginDocument.Info.Title = trimmedPluginDocument.Info.Title?[..^9]; // removing the second ` - Subset` suffix from the title
+        // Ensure reference_id extension value is written according to the plugin auth
+        EnsureSecuritySchemeExtensions(trimmedPluginDocument);
         trimmedPluginDocument.SerializeAsV3(descriptionWriter);
         await descriptionWriter.FlushAsync(cancellationToken).ConfigureAwait(false);
 
         // 3. write the plugins
-
         foreach (var pluginType in Configuration.PluginTypes)
         {
             var manifestFileName = $"{Configuration.ClientClassName.ToLowerInvariant()}-{pluginType.ToString().ToLowerInvariant()}";
             var manifestOutputPath = Path.Combine(Configuration.OutputPath, $"{manifestFileName}{ManifestFileNameSuffix}");
+
 #pragma warning disable CA2007 // Consider calling ConfigureAwait on the awaited task
             await using var fileStream = pluginType == PluginType.OpenAI ? Stream.Null : File.Create(manifestOutputPath, 4096);
             await using var writer = new Utf8JsonWriter(fileStream, new JsonWriterOptions { Indented = true });
@@ -111,6 +114,36 @@ public partial class PluginsGenerationService
         }
     }
 
+    private static string? GetExistingReferenceId(IOpenApiSecurityScheme schema)
+    {
+        if (schema.Extensions is not null
+            && schema.Extensions.TryGetValue(OpenApiAiAuthReferenceIdExtension.Name, out var authReferenceIdExtension)
+            && authReferenceIdExtension is OpenApiAiAuthReferenceIdExtension authReferenceId)
+            return authReferenceId.AuthenticationReferenceId;
+        return null;
+    }
+
+    private static void EnsureSecuritySchemeExtensions(OpenApiDocument document)
+    {
+        var securitySchemes = document?.Components?.SecuritySchemes;
+        if (securitySchemes is null)
+            return;
+        foreach (var securitySchemeItem in securitySchemes)
+        {
+            if (securitySchemeItem.Value is not { Extensions: not null } securityScheme)
+                continue;
+            if (GetExistingReferenceId(securityScheme) is null
+                && TryGetAuthFromSecurityScheme(securitySchemeItem.Key, securityScheme) is Auth auth)
+            {
+                var authReferenceExtension = new OpenApiAiAuthReferenceIdExtension
+                {
+                    AuthenticationReferenceId = auth.GetReferenceId()
+                };
+                securityScheme.Extensions[OpenApiAiAuthReferenceIdExtension.Name] = authReferenceExtension;
+            }
+        }
+    }
+
     private sealed class MappingCleanupVisitor(OpenApiDocument openApiDocument) : OpenApiVisitorBase
     {
         private readonly OpenApiDocument _document = openApiDocument;
@@ -130,22 +163,29 @@ public partial class PluginsGenerationService
     {
         public override void Visit(IOpenApiSchema schema)
         {
-            if (schema.AllOf is not { Count: > 0 })
+            var targetSchema = schema switch
+            {
+                OpenApiSchemaReference openApiSchemaReference => openApiSchemaReference.RecursiveTarget,
+                OpenApiSchema openApiSchema => openApiSchema,
+                _ => null
+            };
+            if (targetSchema is not { AllOf.Count: > 0 })
                 return;
-            var allPropertiesToAdd = GetAllProperties(schema).ToArray();
-            foreach (var allOfEntry in schema.AllOf)
-                SelectFirstAnyOneOfVisitor.CopyRelevantInformation(allOfEntry, schema, false, false);
+            var allPropertiesToAdd = GetAllProperties(targetSchema).ToArray();
+            foreach (var allOfEntry in targetSchema.AllOf)
+                SelectFirstAnyOneOfVisitor.CopyRelevantInformation(allOfEntry, targetSchema, false, false);
+            targetSchema.Properties ??= new Dictionary<string, IOpenApiSchema>(StringComparer.Ordinal);
             foreach (var (key, value) in allPropertiesToAdd)
-                schema.Properties.TryAdd(key, value);
-            schema.AllOf.Clear();
+                targetSchema.Properties.TryAdd(key, value);
+            targetSchema.AllOf.Clear();
             base.Visit(schema);
         }
 
         private static IEnumerable<KeyValuePair<string, IOpenApiSchema>> GetAllProperties(IOpenApiSchema schema)
         {
             return schema.AllOf is not null ?
-                schema.AllOf.SelectMany(static x => GetAllProperties(x)).Union(schema.Properties) :
-                schema.Properties;
+                schema.AllOf.SelectMany(static x => GetAllProperties(x)).Union(schema.Properties ?? new Dictionary<string, IOpenApiSchema>(0)) :
+                (schema.Properties ?? new Dictionary<string, IOpenApiSchema>(0));
         }
     }
 
@@ -170,12 +210,13 @@ public partial class PluginsGenerationService
         }
         public override void Visit(IOpenApiSchema schema)
         {
-            if (schema is OpenApiSchema openApiSchema)
+            if (schema is OpenApiSchema { Properties.Count: > 0 } openApiSchema)
             {
                 openApiSchema.Items = GetFirstSchema(schema.Items);
-                var properties = new Dictionary<string, IOpenApiSchema>(schema.Properties);
+                var properties = new Dictionary<string, IOpenApiSchema>(openApiSchema.Properties);
                 foreach (var (key, value) in properties)
-                    schema.Properties[key] = GetFirstSchema(value);
+                    if (GetFirstSchema(value) is { } firstSchema)
+                        openApiSchema.Properties[key] = firstSchema;
             }
             base.Visit(schema);
         }
@@ -360,12 +401,12 @@ public partial class PluginsGenerationService
         // remove unused components using the OpenApi.Net library
         var requestUrls = new Dictionary<string, List<string>>();
         var basePath = doc.GetAPIRootUrl(Configuration.OpenAPIFilePath);
-        foreach (var path in doc.Paths.Where(static path => path.Value.Operations.Count > 0))
+        foreach (var path in doc.Paths.Where(static path => path.Value.Operations is { Count: > 0 }))
         {
             var key = string.IsNullOrEmpty(basePath)
                 ? path.Key
                 : $"{basePath}/{path.Key.TrimStart(KiotaBuilder.ForwardSlash)}";
-            requestUrls[key] = path.Value.Operations.Keys.Select(static key => key.ToString().ToUpperInvariant()).ToList();
+            requestUrls[key] = path.Value.Operations!.Keys.Select(static key => key.ToString().ToUpperInvariant()).ToList();
         }
 
         if (requestUrls.Count == 0)
@@ -377,7 +418,7 @@ public partial class PluginsGenerationService
 
     private PluginManifestDocument GetManifestDocument(string openApiDocumentPath)
     {
-        var (runtimes, functions, conversationStarters) = GetRuntimesFunctionsAndConversationStartersFromTree(OAIDocument, Configuration.PluginAuthInformation, TreeNode, openApiDocumentPath, Logger);
+        var (runtimes, functions, conversationStarters) = GetRuntimesFunctionsAndConversationStartersFromTree(OAIDocument, Configuration, TreeNode, openApiDocumentPath, Logger);
         var descriptionForHuman = OAIDocument.Info?.Description is string d && !string.IsNullOrEmpty(d) ? d : $"Description for {OAIDocument.Info?.Title}";
         var manifestInfo = ExtractInfoFromDocument(OAIDocument.Info);
         var pluginManifestDocument = new PluginManifestDocument
@@ -432,16 +473,19 @@ public partial class PluginsGenerationService
             ? DefaultContactEmail
             : openApiInfo.Contact.Email;
 
-        if (openApiInfo.Extensions.TryGetValue(OpenApiDescriptionForModelExtension.Name, out var descriptionExtension) &&
-            descriptionExtension is OpenApiDescriptionForModelExtension extension &&
-            !string.IsNullOrEmpty(extension.Description))
-            descriptionForModel = extension.Description.CleanupXMLString();
-        if (openApiInfo.Extensions.TryGetValue(OpenApiLegalInfoUrlExtension.Name, out var legalExtension) && legalExtension is OpenApiLegalInfoUrlExtension legal)
-            legalUrl = legal.Legal;
-        if (openApiInfo.Extensions.TryGetValue(OpenApiLogoExtension.Name, out var logoExtension) && logoExtension is OpenApiLogoExtension logo)
-            logoUrl = logo.Url;
-        if (openApiInfo.Extensions.TryGetValue(OpenApiPrivacyPolicyUrlExtension.Name, out var privacyExtension) && privacyExtension is OpenApiPrivacyPolicyUrlExtension privacy)
-            privacyUrl = privacy.Privacy;
+        if (openApiInfo.Extensions is not null)
+        {
+            if (openApiInfo.Extensions.TryGetValue(OpenApiDescriptionForModelExtension.Name, out var descriptionExtension) &&
+                descriptionExtension is OpenApiDescriptionForModelExtension extension &&
+                !string.IsNullOrEmpty(extension.Description))
+                descriptionForModel = extension.Description.CleanupXMLString();
+            if (openApiInfo.Extensions.TryGetValue(OpenApiLegalInfoUrlExtension.Name, out var legalExtension) && legalExtension is OpenApiLegalInfoUrlExtension legal)
+                legalUrl = legal.Legal;
+            if (openApiInfo.Extensions.TryGetValue(OpenApiLogoExtension.Name, out var logoExtension) && logoExtension is OpenApiLogoExtension logo)
+                logoUrl = logo.Url;
+            if (openApiInfo.Extensions.TryGetValue(OpenApiPrivacyPolicyUrlExtension.Name, out var privacyExtension) && privacyExtension is OpenApiPrivacyPolicyUrlExtension privacy)
+                privacyUrl = privacy.Privacy;
+        }
 
         return new OpenApiManifestInfo(descriptionForModel, legalUrl, logoUrl, privacyUrl, contactEmail);
     }
@@ -456,21 +500,26 @@ public partial class PluginsGenerationService
         string? PrivacyUrl = null,
         string ContactEmail = DefaultContactEmail);
 
-    private static (OpenApiRuntime[], Function[], ConversationStarter[]) GetRuntimesFunctionsAndConversationStartersFromTree(OpenApiDocument document, PluginAuthConfiguration? authInformation, OpenApiUrlTreeNode currentNode,
+    private static (OpenApiRuntime[], Function[], ConversationStarter[]) GetRuntimesFunctionsAndConversationStartersFromTree(OpenApiDocument document, GenerationConfiguration configuration, OpenApiUrlTreeNode currentNode,
         string openApiDocumentPath, ILogger<KiotaBuilder> logger)
     {
         var runtimes = new List<OpenApiRuntime>();
         var functions = new List<Function>();
         var conversationStarters = new List<ConversationStarter>();
-        var configAuth = authInformation?.ToPluginManifestAuth();
-        if (currentNode.PathItems.TryGetValue(Constants.DefaultOpenApiLabel, out var pathItem))
+        var configAuth = configuration.PluginAuthInformation?.ToPluginManifestAuth();
+        if (currentNode.PathItems.TryGetValue(Constants.DefaultOpenApiLabel, out var pathItem) && pathItem.Operations is not null)
         {
             foreach (var operation in pathItem.Operations.Values.Where(static x => !string.IsNullOrEmpty(x.OperationId)))
             {
                 var auth = configAuth;
+
                 try
                 {
-                    auth = configAuth ?? GetAuth(operation.Security ?? document.SecurityRequirements ?? []);
+                    // Priority order: operation security > document security > empty list
+                    var securityToUse = operation.Security?.Count > 0 ? operation.Security :
+                                    document.Security?.Count > 0 ? document.Security :
+                                    new List<OpenApiSecurityRequirement>();
+                    auth = configAuth ?? GetAuth(securityToUse);
                 }
                 catch (UnsupportedSecuritySchemeException e)
                 {
@@ -494,6 +543,7 @@ public partial class PluginsGenerationService
                     Name = operation.OperationId!,
                     Description = !string.IsNullOrEmpty(description) ? description : summary,
                     States = GetStatesFromOperation(operation),
+                    Capabilities = GetFunctionCapabilitiesFromOperation(operation, configuration, logger),
 
                 });
                 conversationStarters.Add(new ConversationStarter
@@ -506,7 +556,7 @@ public partial class PluginsGenerationService
 
         foreach (var node in currentNode.Children)
         {
-            var (childRuntimes, childFunctions, childConversationStarters) = GetRuntimesFunctionsAndConversationStartersFromTree(document, authInformation, node.Value, openApiDocumentPath, logger);
+            var (childRuntimes, childFunctions, childConversationStarters) = GetRuntimesFunctionsAndConversationStartersFromTree(document, configuration, node.Value, openApiDocumentPath, logger);
             runtimes.AddRange(childRuntimes);
             functions.AddRange(childFunctions);
             conversationStarters.AddRange(childConversationStarters);
@@ -525,31 +575,49 @@ public partial class PluginsGenerationService
         }
         var security = securityRequirements.FirstOrDefault();
         var opSecurity = security?.Keys.FirstOrDefault();
-        return (opSecurity is null || opSecurity.UnresolvedReference) ? new AnonymousAuth() : GetAuthFromSecurityScheme(opSecurity);
+        return (opSecurity is null || opSecurity.UnresolvedReference) ? new AnonymousAuth() : GetAuthFromSecuritySchemeReference(opSecurity);
     }
 
-    private static Auth GetAuthFromSecurityScheme(OpenApiSecuritySchemeReference securityScheme)
+    private static Auth GetAuthFromSecuritySchemeReference(OpenApiSecuritySchemeReference securityScheme)
     {
-        string name = securityScheme.Reference.Id;
+        var name = securityScheme.Reference.Id;
+        var auth = TryGetAuthFromSecurityScheme(name, securityScheme);
+        if (auth != null)
+            return auth;
+
+        throw new UnsupportedSecuritySchemeException(["Bearer Token", "Api Key", "OpenId Connect", "OAuth"],
+                $"Unsupported security scheme type '{securityScheme.Type}'.");
+    }
+
+    private static Auth? TryGetAuthFromSecurityScheme(string? name, IOpenApiSecurityScheme securityScheme)
+    {
+        string? authenticationReferenceId = null;
+
+        if (securityScheme.Extensions is not null && securityScheme.Extensions.TryGetValue(OpenApiAiAuthReferenceIdExtension.Name, out var authReferenceIdExtension) && authReferenceIdExtension is OpenApiAiAuthReferenceIdExtension authReferenceId)
+            authenticationReferenceId = authReferenceId.AuthenticationReferenceId;
+
         return securityScheme.Type switch
         {
             SecuritySchemeType.ApiKey => new ApiKeyPluginVault
             {
-                ReferenceId = $"{{{name}_REGISTRATION_ID}}"
+                ReferenceId = string.IsNullOrEmpty(authenticationReferenceId) ? $"{{{name}_REGISTRATION_ID}}" : authenticationReferenceId
             },
             // Only Http bearer is supported
-            SecuritySchemeType.Http when securityScheme.Scheme.Equals("bearer", StringComparison.OrdinalIgnoreCase) =>
-                new ApiKeyPluginVault { ReferenceId = $"{{{name}_REGISTRATION_ID}}" },
+            SecuritySchemeType.Http when "bearer".Equals(securityScheme.Scheme, StringComparison.OrdinalIgnoreCase) =>
+                new ApiKeyPluginVault
+                {
+                    ReferenceId = string.IsNullOrEmpty(authenticationReferenceId) ? $"{{{name}_REGISTRATION_ID}}" : authenticationReferenceId
+                },
             SecuritySchemeType.OpenIdConnect => new ApiKeyPluginVault
             {
-                ReferenceId = $"{{{name}_REGISTRATION_ID}}"
+                ReferenceId = string.IsNullOrEmpty(authenticationReferenceId) ? $"{{{name}_REGISTRATION_ID}}" : authenticationReferenceId
             },
+            SecuritySchemeType.OAuth2 when securityScheme.Flows?.Implicit != null => new AnonymousAuth(),
             SecuritySchemeType.OAuth2 => new OAuthPluginVault
             {
-                ReferenceId = $"{{{name}_CONFIGURATION_ID}}"
+                ReferenceId = string.IsNullOrEmpty(authenticationReferenceId) ? $"{{{name}_REGISTRATION_ID}}" : authenticationReferenceId
             },
-            _ => throw new UnsupportedSecuritySchemeException(["Bearer Token", "Api Key", "OpenId Connect", "OAuth"],
-                $"Unsupported security scheme type '{securityScheme.Type}'.")
+            _ => null
         };
     }
 
@@ -584,5 +652,147 @@ public partial class PluginsGenerationService
         }
 
         return null;
+    }
+
+    private static FunctionCapabilities? GetFunctionCapabilitiesFromOperation(OpenApiOperation openApiOperation, GenerationConfiguration configuration, ILogger<KiotaBuilder> logger)
+    {
+        var capabilities = GetFunctionCapabilitiesFromCapabilitiesExtension(openApiOperation, OpenApiAiCapabilitiesExtension.Name);
+        if (capabilities != null)
+        {
+            return capabilities;
+        }
+
+
+        var responseSemantics = GetResponseSemanticsFromAdaptiveCardExtension(openApiOperation, OpenApiAiAdaptiveCardExtension.Name) ??
+            GetResponseSemanticsFromTemplate(openApiOperation, configuration, logger);
+
+        return new FunctionCapabilities
+        {
+            ResponseSemantics = responseSemantics
+        };
+
+    }
+
+    private static FunctionCapabilities? GetFunctionCapabilitiesFromCapabilitiesExtension(OpenApiOperation openApiOperation, string extensionName)
+    {
+        if (openApiOperation.Extensions is not null &&
+            openApiOperation.Extensions.TryGetValue(extensionName, out var capabilitiesExtension) &&
+            capabilitiesExtension is OpenApiAiCapabilitiesExtension capabilities)
+        {
+            var functionCapabilities = new FunctionCapabilities();
+
+            // Set ResponseSemantics
+            if (capabilities.ResponseSemantics is not null)
+            {
+                var responseSemantics = new ResponseSemantics();
+
+                responseSemantics.DataPath = capabilities.ResponseSemantics.DataPath;
+                if (capabilities.ResponseSemantics.StaticTemplate is not null && capabilities.ResponseSemantics.StaticTemplate is JsonObject staticTemplateObj)
+                {
+                    using JsonDocument doc = JsonDocument.Parse(staticTemplateObj.ToJsonString());
+                    JsonElement staticTemplate = doc.RootElement.Clone();
+                    responseSemantics.StaticTemplate = staticTemplate;
+                }
+                if (capabilities.ResponseSemantics.Properties is not null)
+                {
+                    responseSemantics.Properties = new ResponseSemanticsProperties
+                    {
+                        Title = capabilities.ResponseSemantics.Properties.Title,
+                        Subtitle = capabilities.ResponseSemantics.Properties.Subtitle,
+                        Url = capabilities.ResponseSemantics.Properties.Url,
+                        ThumbnailUrl = capabilities.ResponseSemantics.Properties.ThumbnailUrl,
+                        InformationProtectionLabel = capabilities.ResponseSemantics.Properties.InformationProtectionLabel,
+                        TemplateSelector = capabilities.ResponseSemantics.Properties.TemplateSelector
+                    };
+                }
+                responseSemantics.OAuthCardPath = capabilities.ResponseSemantics.OauthCardPath;
+                functionCapabilities.ResponseSemantics = responseSemantics;
+            }
+
+            // Set Confirmation
+            if (capabilities.Confirmation is not null)
+            {
+                var confirmation = new Confirmation
+                {
+                    Type = capabilities.Confirmation.Type,
+                    Title = capabilities.Confirmation.Title,
+                    Body = capabilities.Confirmation.Body,
+                };
+                functionCapabilities.Confirmation = confirmation;
+            }
+
+            // Set SecurityInfo
+            if (capabilities.SecurityInfo is not null)
+            {
+                var securityInfo = new SecurityInfo
+                {
+                    DataHandling = capabilities.SecurityInfo.DataHandling,
+                };
+                functionCapabilities.SecurityInfo = securityInfo;
+            }
+            return functionCapabilities;
+        }
+
+        return null;
+    }
+
+    private static ResponseSemantics? GetResponseSemanticsFromAdaptiveCardExtension(OpenApiOperation openApiOperation, string extensionName)
+    {
+        if (openApiOperation.Extensions is not null &&
+            openApiOperation.Extensions.TryGetValue(extensionName, out var adaptiveCardExtension) && adaptiveCardExtension is OpenApiAiAdaptiveCardExtension adaptiveCard)
+        {
+            JsonNode node = new JsonObject();
+            node["file"] = JsonValue.Create(adaptiveCard.File);
+            using JsonDocument doc = JsonDocument.Parse(node.ToJsonString());
+            JsonElement staticTemplate = doc.RootElement.Clone();
+            return new ResponseSemantics
+            {
+                DataPath = adaptiveCard.DataPath,
+                StaticTemplate = staticTemplate,
+            };
+        }
+
+        return null;
+    }
+
+    private static ResponseSemantics? GetResponseSemanticsFromTemplate(OpenApiOperation openApiOperation, GenerationConfiguration configuration, ILogger<KiotaBuilder> logger)
+    {
+        if (openApiOperation.Responses is null
+            || openApiOperation.Responses.Count == 0
+            || openApiOperation.OperationId is null
+            || !openApiOperation.Responses.TryGetValue("200", out var response)
+            || response is null
+            || response.Content is null
+            || response.Content.Count == 0
+            || response.Content["application/json"]?.Schema is null)
+        {
+            return null;
+        }
+
+        string functionName = openApiOperation.OperationId;
+        string fileName = $"{functionName}.json";
+        string staticTemplateJson = $"{{\"file\": \"./adaptiveCards/{fileName}\"}}";
+        try
+        {
+            WriteAdaptiveCardTemplate(configuration, fileName, logger);
+            using JsonDocument doc = JsonDocument.Parse(staticTemplateJson);
+            JsonElement staticTemplate = doc.RootElement.Clone();
+            return new ResponseSemantics()
+            {
+                DataPath = "$",
+                StaticTemplate = staticTemplate
+            };
+        }
+        catch (IOException)
+        {
+
+            return null;
+        }
+    }
+
+    private static void WriteAdaptiveCardTemplate(GenerationConfiguration configuration, string fileName, ILogger<KiotaBuilder> logger)
+    {
+        var adaptiveCardOutputPath = Path.Combine(configuration.OutputPath, "adaptiveCards", fileName);
+        new AdaptiveCardTemplate(logger).Write(adaptiveCardOutputPath);
     }
 }
